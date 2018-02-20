@@ -20,4 +20,5 @@ XCTMain([
     testCase(SubdataTests.allTests),
     testCase(StringTests.allTests),
     testCase(TrueTests.allTests),
+    testCase(EncoderTests.allTests)
 ])
