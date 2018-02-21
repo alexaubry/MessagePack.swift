@@ -96,8 +96,10 @@ class EncoderTests: XCTestCase {
         let encodedInt32 = try encoder.encode(Int32(-123456789))
         XCTAssertEqual(encodedInt32, Data([0xd2, 0xf8, 0xa4, 0x32, 0xeb]))
 
-        let encodedInt64 = try encoder.encode(Int64(-123456789987654321))
-        XCTAssertEqual(encodedInt64, Data([0xd3, 0xfe, 0x49, 0x64, 0xb4, 0x1f, 0xad, 0x05, 0x4f]))
+        #if arch(x86_64) || arch(arm64)
+            let encodedInt64 = try encoder.encode(Int64(-123456789987654321))
+            XCTAssertEqual(encodedInt64, Data([0xd3, 0xfe, 0x49, 0x64, 0xb4, 0x1f, 0xad, 0x05, 0x4f]))
+        #endif
 
         // UInt
 
@@ -113,8 +115,10 @@ class EncoderTests: XCTestCase {
         let encodedUInt32 = try encoder.encode(UInt32(123456789))
         XCTAssertEqual(encodedUInt32, Data([0xce, 0x07, 0x5b, 0xcd, 0x15]))
 
-        let encodedUInt64 = try encoder.encode(UInt64(1234567890987654321))
-        XCTAssertEqual(encodedUInt64, Data([0xcf, 0x11, 0x22, 0x10, 0xf4, 0xb1, 0x6c, 0x1c, 0xb1]))
+        #if arch(x86_64) || arch(arm64)
+            let encodedUInt64 = try encoder.encode(UInt64(1234567890987654321))
+            XCTAssertEqual(encodedUInt64, Data([0xcf, 0x11, 0x22, 0x10, 0xf4, 0xb1, 0x6c, 0x1c, 0xb1]))
+        #endif
 
     }
 
@@ -211,6 +215,7 @@ class EncoderTests: XCTestCase {
 
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US")
+        formatter.timeZone = TimeZone(identifier: "GMT")
         formatter.dateStyle = .short
         formatter.timeStyle = .short
         formatter.pmSymbol = "Post Meridiem"
@@ -218,7 +223,7 @@ class EncoderTests: XCTestCase {
         let formatterEncoder = MessagePackStructureEncoder(userInfo: [:], dateEncodingStrategy: .dateFormatter(formatter))
         try formatterEncoder.encode(date)
 
-        XCTAssertEqual(formatterEncoder.container, .singleValue(.string("1/1/70, 8:10 Post Meridiem")))
+        XCTAssertEqual(formatterEncoder.container, .singleValue(.string("1/1/70, 7:10 Post Meridiem")))
 
         // Deferred to Date
 
@@ -230,20 +235,8 @@ class EncoderTests: XCTestCase {
         // ISO
 
         let isoEncoder = MessagePackStructureEncoder(userInfo: [:], dateEncodingStrategy: .iso8601)
-
-        if #available(iOS 10, macOS 10.12, watchOS 3, tvOS 10, *) {
-
-            try isoEncoder.encode(date)
-            XCTAssertEqual(isoEncoder.container, .singleValue(.string("1970-01-01T19:10:00Z")))
-
-        } else {
-
-            do {
-                try isoEncoder.encode(date)
-                XCTFail("ISO encoding is not available on the tested platform, encoding should fail.")
-            } catch {}
-
-        }
+        try isoEncoder.encode(date)
+        XCTAssertEqual(isoEncoder.container, .singleValue(.string("1970-01-01T19:10:00Z")))
 
     }
 

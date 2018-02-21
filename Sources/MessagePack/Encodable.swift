@@ -22,7 +22,6 @@ public final class MessagePackEncoder {
         case deferredToDate
 
         /// Encode the date to an ISO-8601 string.
-        @available(iOS 10.0, macOS 10.12, tvOS 10.0, watchOS 3.0, *)
         case iso8601
 
         /// Encode the date as the time interval since 1970, in seconds.
@@ -115,11 +114,11 @@ class MessagePackStructureEncoder: Encoder, CodingPathWorkPerforming {
     /// The path to the current point in encoding.
     var codingPath: [CodingKey]
 
-    /// Contextual user-provided information for use during encoding.
-    var userInfo: [CodingUserInfoKey : Any]
-
     /// The number of path elements before encoding started.
     let initialCodingPathLength: Int
+
+    /// Contextual user-provided information for use during encoding.
+    var userInfo: [CodingUserInfoKey : Any]
 
     // MARK: Options
 
@@ -131,9 +130,9 @@ class MessagePackStructureEncoder: Encoder, CodingPathWorkPerforming {
     init(codingPath: [CodingKey] = [], userInfo: [CodingUserInfoKey : Any], dateEncodingStrategy: MessagePackEncoder.DateEncodingStrategy) {
         self.container = nil
         self.codingPath = codingPath
+        self.initialCodingPathLength = codingPath.count
         self.userInfo = userInfo
         self.dateEncodingStrategy = dateEncodingStrategy
-        self.initialCodingPathLength = codingPath.count
     }
 
     // MARK: Coding Path Operations
@@ -338,15 +337,18 @@ extension MessagePackStructureEncoder {
             if #available(iOS 10, macOS 10.12, tvOS 10, watchOS 3, *) {
 
                 let formatter = ISO8601DateFormatter()
-                formatter.formatOptions = .withInternetDateTime
 
                 let dateString = formatter.string(from: date)
                 return dateString
 
             } else {
-                let errorContext = EncodingError.Context(codingPath: codingPath,
-                                                         debugDescription: "ISO-8601 date encoding is not available on this platform.")
-                throw EncodingError.invalidValue(date, errorContext)
+
+                let formatter = DateFormatter()
+                formatter.timeZone = TimeZone(identifier: "GMT")!
+                formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ssXXXXX"
+
+                return formatter.string(from: date)
+
             }
 
         case .millisecondsSince1970:
