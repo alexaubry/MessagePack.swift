@@ -1,6 +1,8 @@
 import Foundation
 
-/// An encoding container.
+// MARK: Coding Container
+
+/// A container for data serialization.
 enum CodingContainer: Equatable {
 
     /// A single value container associated with a single-value storage.
@@ -29,7 +31,43 @@ enum CodingContainer: Equatable {
 
 }
 
-// MARK: Array Storage
+// MARK: - Coding Path Error Handling
+
+/// A protocol for objects that perform work with a coding path.
+
+protocol CodingPathWorkPerforming: class {
+    var codingPath: [CodingKey] { get set }
+    var initialCodingPathLength: Int { get }
+}
+
+extension CodingPathWorkPerforming {
+
+    /// Checks if previous failures keep up from performing a coding path work.
+    func assertCanPerformWork() {
+        precondition(codingPath.count == initialCodingPathLength,
+                     "Cannot perform work new value because previous error was ignored.")
+    }
+
+    ///
+    /// Performs the work for the value at the given key.
+    ///
+    /// The key will be pushed onto the end of the current coding path. If the `work` fails, `key`
+    /// will be left in the coding path, which indicates a failure and prevents encoding more values.
+    ///
+    /// - parameter key: The key to the value we're working with.
+    /// - parameter work: The work to perform with the key in the path.
+    ///
+
+    func with<T>(pushedKey key: CodingKey, _ work: () throws -> T) rethrows -> T {
+        self.codingPath.append(key)
+        let result: T = try work()
+        codingPath.removeLast()
+        return result
+    }
+
+}
+
+// MARK: - Array Storage
 
 /// An object that holds a reference to an array. Use this class when you need an Array with
 /// reference semantics.
@@ -43,6 +81,11 @@ class CodingArrayStorage {
     /// Creates an empty array storage.
     init() {
         array = [MessagePackValue]()
+    }
+
+    /// Creates a storage from an existing array.
+    init(_ array: [MessagePackValue]) {
+        self.array = array
     }
 
     // MARK: Array Interaction
@@ -60,6 +103,17 @@ class CodingArrayStorage {
     /// Inserts a new element in the array.
     func insert(_ element: MessagePackValue, at index: Int) {
         array.insert(element, at: index)
+    }
+
+    /// Returns the value at the given index
+    func value(at index: Int) -> MessagePackValue? {
+
+        guard array.indices.contains(index) else {
+            return nil
+        }
+
+        return array[index]
+
     }
 
     // MARK: Contents
@@ -90,14 +144,28 @@ class CodingDictionaryStorage {
         dictionary = [MessagePackValue: MessagePackValue]()
     }
 
+    /// Creates a storage from an existing dictionary.
+    init(_ dictionary: [MessagePackValue: MessagePackValue]) {
+        self.dictionary = dictionary
+    }
+
     // MARK: Dictionary Interaction
 
-    /// Sets or removes the value for the specified key.
-    func setValue(_ value: MessagePackValue?, forKey key: CodingKey) {
-        dictionary[.string(key.stringValue)] = value
+    /// Access and update the element keyed with the specified coding key.
+    subscript(key: CodingKey) -> MessagePackValue? {
+        get {
+            return self.dictionary[key.storageKey]
+        }
+        set {
+            self.dictionary[key.storageKey] = newValue
+        }
     }
 
     // MARK: Contents
+
+    var keys: Dictionary<MessagePackValue, MessagePackValue>.Keys {
+        return dictionary.keys
+    }
 
     /// A copy of the contents of the dictionary storage.
     func copy() -> [MessagePackValue: MessagePackValue] {
@@ -106,10 +174,10 @@ class CodingDictionaryStorage {
 
 }
 
-// MARK: - JSON Key
+// MARK: - MessagePack Storage Keys
 
 /// A key for MessagePack objects.
-enum MessagePackCodingKey: CodingKey {
+enum MessagePackCodingKey: CodingKey, Hashable {
 
     /// A string key.
     case string(String)
@@ -153,6 +221,54 @@ enum MessagePackCodingKey: CodingKey {
     /// Creates a JSON key with a String raw key.
     init(stringValue: String) {
         self = .string(stringValue)
+    }
+
+    static func == (lhs: MessagePackCodingKey, rhs: MessagePackCodingKey) -> Bool {
+
+        switch (lhs, rhs) {
+        case let (.string(lString), .string(rString)):
+            return lString == rString
+
+        case let (.index(lIndex), .index(rIndex)):
+            return lIndex == rIndex
+
+        case (.super, .super):
+            return true
+
+        default:
+            return false
+        }
+
+    }
+
+    var hashValue: Int {
+        return stringValue.hashValue
+    }
+
+}
+
+extension CodingKey {
+
+    /// Returns the dictionary key appropriate for nested storage references.
+    var nestedStorageKey: MessagePackCodingKey {
+
+        if let intValue = self.intValue {
+            return .index(intValue)
+        } else {
+            return .string(self.stringValue)
+        }
+
+    }
+
+    /// Returns the dictionary key appropriate for the coding key.
+    var storageKey: MessagePackValue {
+
+        if let intValue = self.intValue {
+            return .int(Int64(intValue))
+        } else {
+            return .string(self.stringValue)
+        }
+
     }
 
 }

@@ -1,17 +1,24 @@
 import Foundation
 
+///
 /// Encodes objects to the MessagePack format.
+///
+/// - warning: In your `Encodable` implementations, you must not ignore errors thrown by the
+/// encoder or one of its containers.
+///
+
 public final class MessagePackEncoder {
 
     /// A dictionary you use to customize the encoding process by providing contextual information.
     public var userInfo: [CodingUserInfoKey : Any] = [:]
 
-    // MARK: - Encoding Dates
+    // MARK: Encoding Dates
 
     /// How to encode dates.
     public enum DateEncodingStrategy {
 
-        /// Use the default format from the `Date` class.
+        /// Use the default format from the `Date` class. Returns the time elapsed since the
+        /// reference date.
         case deferredToDate
 
         /// Encode the date to an ISO-8601 string.
@@ -35,16 +42,19 @@ public final class MessagePackEncoder {
     /// The strategy used when encoding dates as part of a MessagePack object.
     public var dateEncodingStrategy: DateEncodingStrategy = .deferredToDate
 
-    // MARK: - Encoding
+    // MARK: Encoding
 
+    ///
     /// Encodes an object to the MessagePack format.
     ///
     /// - parameter object: The object to encode to MessagePack.
     /// - returns: A Data object containing the MessagePack representation of the object.
+    ///
 
     public func encode(_ object: Encodable) throws -> Data {
 
-        let structureEncoder = MessagePackStructureEncoder(userInfo: userInfo, dateEncodingStrategy: dateEncodingStrategy)
+        let structureEncoder = MessagePackStructureEncoder(codingPath: [], userInfo: userInfo,
+                                                           dateEncodingStrategy: dateEncodingStrategy)
 
         /*** I- Encode the structure of the value ***/
 
@@ -70,8 +80,8 @@ public final class MessagePackEncoder {
         /*** II- Get the encoded MessagePack value and pack it ***/
 
         guard let topLevelContainer = structureEncoder.container else {
-            let errorContext =  EncodingError.Context(codingPath: structureEncoder.codingPath,
-                                                      debugDescription: "Top-level object did not encode any values.")
+            let errorContext = EncodingError.Context(codingPath: structureEncoder.codingPath,
+                                                     debugDescription: "Top-level object did not encode any values.")
             throw EncodingError.invalidValue(object, errorContext)
         }
 
@@ -97,7 +107,7 @@ public final class MessagePackEncoder {
 // MARK: - Structure Encoder
 
 /// A class that serializes the structure of an encodable object.
-class MessagePackStructureEncoder: Encoder {
+class MessagePackStructureEncoder: Encoder, CodingPathWorkPerforming {
 
     /// The encoder's storage.
     var container: CodingContainer?
@@ -108,6 +118,9 @@ class MessagePackStructureEncoder: Encoder {
     /// Contextual user-provided information for use during encoding.
     var userInfo: [CodingUserInfoKey : Any]
 
+    /// The number of path elements before encoding started.
+    let initialCodingPathLength: Int
+
     // MARK: Options
 
     /// The date encoding strategy.
@@ -115,48 +128,42 @@ class MessagePackStructureEncoder: Encoder {
 
     // MARK: Initialization
 
-    init(userInfo: [CodingUserInfoKey : Any], dateEncodingStrategy: MessagePackEncoder.DateEncodingStrategy) {
+    init(codingPath: [CodingKey] = [], userInfo: [CodingUserInfoKey : Any], dateEncodingStrategy: MessagePackEncoder.DateEncodingStrategy) {
         self.container = nil
-        self.codingPath = []
+        self.codingPath = codingPath
         self.userInfo = userInfo
         self.dateEncodingStrategy = dateEncodingStrategy
+        self.initialCodingPathLength = codingPath.count
     }
 
     // MARK: Coding Path Operations
 
-    /// Indicates whether encoding has failed at the current key path.
-    var containsFailures: Bool {
-        return codingPath.isEmpty == false
-    }
-
     ///
     /// Asserts that it is possible for the encoded value to request a new container.
     ///
-    /// The value can only request one container. If the storage contains more containers than the
-    /// encoder has coding keys, it means that the value is trying to request more than one container
-    /// which is invalid.
+    /// The value can only request one container, where there is no failures.
     ///
 
     func assertCanRequestNewContainer() {
         precondition(container == nil, "You cannot request multiple containers to encode the same object.")
-        precondition(containsFailures == false, "Cannot encode to a new container, because an error occured while encoding a value at path '\(codingPath)'.")
+        assertCanPerformWork()
     }
 
     ///
-    /// Performs the given closure with the given key pushed onto the end of the current coding path.
+    /// Performs the work for the value at the given key.
     ///
-    /// - parameter key: The key to push. May be nil for unkeyed containers.
+    /// The key will be pushed onto the end of the current coding path. If the `work` fails, `key`
+    /// will be left in the coding path, which indicates a failure and prevents encoding more values.
+    ///
+    /// - parameter key: The key to the value we're encoding.
     /// - parameter work: The work to perform with the key in the path.
-    ///
-    /// If the `work` fails, `key` will be left in the coding path, which indicates a failure and
-    /// prevents requesting new containers.
     ///
 
     fileprivate func with<T>(pushedKey key: CodingKey, _ work: () throws -> T) rethrows -> T {
         self.codingPath.append(key)
-        let ret: T = try work()
+        let result: T = try work()
         codingPath.removeLast()
-        return ret
+        return result
     }
 
     // MARK: Containers
@@ -165,7 +172,7 @@ class MessagePackStructureEncoder: Encoder {
         assertCanRequestNewContainer()
         let storage = CodingDictionaryStorage()
         container = .keyed(storage)
-        let keyedContainer = MessagePackKeyedEncodingContainer<Key>(referencing: self, codingPath: codingPath, wrapping: storage)
+        let keyedContainer = MessagePackKeyedEncodingContainer<Key>(referencing: self, wrapping: storage, codingPath: codingPath)
         return KeyedEncodingContainer(keyedContainer)
     }
 
@@ -173,7 +180,7 @@ class MessagePackStructureEncoder: Encoder {
         assertCanRequestNewContainer()
         let storage = CodingArrayStorage()
         container = .unkeyed(storage)
-        return MessagePackUnkeyedEncodingContainer(referencing: self, codingPath: codingPath, wrapping: storage)
+        return MessagePackUnkeyedEncodingContainer(referencing: self, wrapping: storage, codingPath: codingPath)
     }
 
     func singleValueContainer() -> SingleValueEncodingContainer {
@@ -187,12 +194,10 @@ class MessagePackStructureEncoder: Encoder {
 
 extension MessagePackStructureEncoder: SingleValueEncodingContainer {
 
-    ///
-    /// Asserts that a single value can be encoded into the container (i.e. that no value has
-    /// previously been encoded.
-    ///
-
+    /// Asserts that a single value can be encoded into the container.
     func assertCanEncodeSingleValue() {
+
+        assertCanPerformWork()
 
         switch container {
         case .singleValue?:
@@ -244,27 +249,27 @@ extension MessagePackStructureEncoder: SingleValueEncodingContainer {
 
     func encode(_ value: UInt) {
         assertCanEncodeSingleValue()
-        container = .singleValue(.int(Int64(value)))
+        container = .singleValue(.uint(UInt64(value)))
     }
 
     func encode(_ value: UInt8) {
         assertCanEncodeSingleValue()
-        container = .singleValue(.int(Int64(value)))
+        container = .singleValue(.uint(UInt64(value)))
     }
 
     func encode(_ value: UInt16) {
         assertCanEncodeSingleValue()
-        container = .singleValue(.int(Int64(value)))
+        container = .singleValue(.uint(UInt64(value)))
     }
 
     func encode(_ value: UInt32) {
         assertCanEncodeSingleValue()
-        container = .singleValue(.int(Int64(value)))
+        container = .singleValue(.uint(UInt64(value)))
     }
 
     func encode(_ value: UInt64) {
         assertCanEncodeSingleValue()
-        container = .singleValue(.int(Int64(value)))
+        container = .singleValue(.uint(UInt64(value)))
     }
 
     func encode(_ value: Float) {
@@ -284,12 +289,15 @@ extension MessagePackStructureEncoder: SingleValueEncodingContainer {
 
     func encode<T: Encodable>(_ value: T) throws  {
         assertCanEncodeSingleValue()
-        container = try encodeToDetachedContainer(value)
+
+        container = try self.with(pushedKey: MessagePackCodingKey.index(0)) {
+            try encodeToDetachedContainer(value)
+        }
     }
 
 }
 
-// MARK: - Single Value Parsers
+// MARK: - Single Value Serialization
 
 extension MessagePackStructureEncoder {
 
@@ -298,23 +306,20 @@ extension MessagePackStructureEncoder {
 
         var encodedValue: Encodable = value
 
+        // If the value is a Date, encode the value appropriate for the strategy.
         // If the value is a URL, encode the absolute String.
-        if let url = value as? URL {
-            return .singleValue(.string(url.absoluteString))
-        }
-
         // If the value is a Data, encode the value into a MessagePack representation.
-        if let data = value as? Data {
+
+        if let date = value as? Date {
+            encodedValue = try encodableDateValue(for: date)
+        } else if let url = value as? URL {
+            return .singleValue(.string(url.absoluteString))
+        } else if let data = value as? Data {
             return .singleValue(.binary(data))
         }
 
-        // If the value is a Date, encode the value appropriate for the strategy.
-        if let date = value as? Date {
-            encodedValue = try encodableDateValue(for: date)
-        }
-
         // Encode the value to a detached container
-        let tempEncoder = MessagePackStructureEncoder(userInfo: userInfo, dateEncodingStrategy: dateEncodingStrategy)
+        let tempEncoder = MessagePackStructureEncoder(codingPath: codingPath, userInfo: userInfo, dateEncodingStrategy: dateEncodingStrategy)
         try encodedValue.encode(to: tempEncoder)
 
         return tempEncoder.container
@@ -363,7 +368,7 @@ extension MessagePackStructureEncoder {
 
 // MARK: - Unkeyed Container
 
-private class MessagePackUnkeyedEncodingContainer: UnkeyedEncodingContainer {
+private class MessagePackUnkeyedEncodingContainer: UnkeyedEncodingContainer, CodingPathWorkPerforming {
 
     /// A reference to the encoder we're writing to.
     let encoder: MessagePackStructureEncoder
@@ -374,12 +379,16 @@ private class MessagePackUnkeyedEncodingContainer: UnkeyedEncodingContainer {
     /// The path of coding keys taken to get to this point in encoding.
     var codingPath: [CodingKey]
 
+    /// The number of path elements before encoding started.
+    let initialCodingPathLength: Int
+
     // MARK: Initialization
 
-    init(referencing encoder: MessagePackStructureEncoder, codingPath: [CodingKey], wrapping storage: CodingArrayStorage) {
+    init(referencing encoder: MessagePackStructureEncoder, wrapping storage: CodingArrayStorage, codingPath: [CodingKey]) {
         self.encoder = encoder
-        self.codingPath = codingPath
         self.storage = storage
+        self.codingPath = codingPath
+        self.initialCodingPathLength = codingPath.count
     }
 
     // MARK: Encoding
@@ -389,70 +398,87 @@ private class MessagePackUnkeyedEncodingContainer: UnkeyedEncodingContainer {
     }
 
     func encodeNil() {
+        assertCanPerformWork()
         storage.append(.nil)
     }
 
     func encode(_ value: Bool) {
+        assertCanPerformWork()
         storage.append(.bool(value))
     }
 
     func encode(_ value: Int) {
+        assertCanPerformWork()
         storage.append(.int(Int64(value)))
     }
 
     func encode(_ value: Int8) {
+        assertCanPerformWork()
         storage.append(.int(Int64(value)))
     }
 
     func encode(_ value: Int16) {
+        assertCanPerformWork()
         storage.append(.int(Int64(value)))
     }
 
     func encode(_ value: Int32) {
+        assertCanPerformWork()
         storage.append(.int(Int64(value)))
     }
 
     func encode(_ value: Int64) {
+        assertCanPerformWork()
         storage.append(.int(Int64(value)))
     }
 
     func encode(_ value: UInt) {
+        assertCanPerformWork()
         storage.append(.int(Int64(value)))
     }
 
     func encode(_ value: UInt8) {
+        assertCanPerformWork()
         storage.append(.int(Int64(value)))
     }
 
     func encode(_ value: UInt16) {
+        assertCanPerformWork()
         storage.append(.int(Int64(value)))
     }
 
     func encode(_ value: UInt32) {
+        assertCanPerformWork()
         storage.append(.int(Int64(value)))
     }
 
     func encode(_ value: UInt64) {
+        assertCanPerformWork()
         storage.append(.int(Int64(value)))
     }
 
     func encode(_ value: Float) {
+        assertCanPerformWork()
         storage.append(.float(value))
     }
 
     func encode(_ value: Double) {
+        assertCanPerformWork()
         storage.append(.double(value))
     }
 
     func encode(_ value: String) {
+        assertCanPerformWork()
         storage.append(.string(value))
     }
 
     func encode<T: Encodable>(_ value: T) throws  {
 
+        assertCanPerformWork()
+
         // Encode the value in a temporary container and insert the contents into the array storage
 
-        try encoder.with(pushedKey: MessagePackCodingKey.index(count)) {
+        try self.with(pushedKey: MessagePackCodingKey.index(count)) {
 
             guard let newContainer = try self.encoder.encodeToDetachedContainer(value) else {
                 let errorContext =  EncodingError.Context(codingPath: self.encoder.codingPath,
@@ -492,23 +518,30 @@ private class MessagePackUnkeyedEncodingContainer: UnkeyedEncodingContainer {
 
     func nestedContainer<NestedKey: CodingKey>(keyedBy keyType: NestedKey.Type) -> KeyedEncodingContainer<NestedKey> {
 
+        assertCanPerformWork()
+
         let nestedStorage = CodingDictionaryStorage()
         nestedKeyedContainers[endIndex] = nestedStorage
 
-        let keyedContainer = MessagePackKeyedEncodingContainer<NestedKey>(referencing: encoder, codingPath: codingPath, wrapping: nestedStorage)
+        let keyedContainer = MessagePackKeyedEncodingContainer<NestedKey>(referencing: encoder, wrapping: nestedStorage,
+                                                                          codingPath: codingPath)
         return KeyedEncodingContainer(keyedContainer)
 
     }
 
     func nestedUnkeyedContainer() -> UnkeyedEncodingContainer {
 
+        assertCanPerformWork()
+
         let nestedStorage = CodingArrayStorage()
         nestedUnkeyedContainers[endIndex] = nestedStorage
 
-        return MessagePackUnkeyedEncodingContainer(referencing: encoder, codingPath: codingPath, wrapping: nestedStorage)
+        return MessagePackUnkeyedEncodingContainer(referencing: encoder, wrapping: nestedStorage, codingPath: codingPath)
+
     }
 
     func superEncoder() -> Encoder {
+        assertCanPerformWork()
         precondition(currentSuperEncoder == nil, "You can only encode `super` one time.")
         currentSuperEncoder = MessagePackReferencingEncoder(referencing: encoder, at: endIndex)
         return currentSuperEncoder!
@@ -518,6 +551,13 @@ private class MessagePackUnkeyedEncodingContainer: UnkeyedEncodingContainer {
 
     deinit {
 
+        // Exit if no nested data needs to be encoded.
+
+        if nestedKeyedContainers.isEmpty && nestedUnkeyedContainers.isEmpty && currentSuperEncoder == nil {
+            return
+        }
+
+        assertCanPerformWork()
         var nestedValues: [Int: MessagePackValue] = [:]
 
         // When the Encodable object finished encoding, add the contents of the nested containers
@@ -543,6 +583,8 @@ private class MessagePackUnkeyedEncodingContainer: UnkeyedEncodingContainer {
 
         // Sort and add to the storage
 
+        assertCanPerformWork()
+
         let sortedNestedValues = nestedValues.sorted { $0.key < $1.key }
 
         for (index, nestedValue) in sortedNestedValues {
@@ -555,11 +597,7 @@ private class MessagePackUnkeyedEncodingContainer: UnkeyedEncodingContainer {
 
 // MARK: - Keyed Encoding Container
 
-///
-/// A keyed encoding container for objects.
-///
-
-private class MessagePackKeyedEncodingContainer<K: CodingKey>: KeyedEncodingContainerProtocol {
+private class MessagePackKeyedEncodingContainer<K: CodingKey>: KeyedEncodingContainerProtocol, CodingPathWorkPerforming {
     typealias Key = K
 
     /// A reference to the encoder we're writing to.
@@ -571,79 +609,100 @@ private class MessagePackKeyedEncodingContainer<K: CodingKey>: KeyedEncodingCont
     /// The path of coding keys taken to get to this point in encoding.
     var codingPath: [CodingKey]
 
+    /// The number of path elements before encoding started.
+    let initialCodingPathLength: Int
+
     // MARK: Initialization
 
-    init(referencing encoder: MessagePackStructureEncoder, codingPath: [CodingKey], wrapping storage: CodingDictionaryStorage) {
+    init(referencing encoder: MessagePackStructureEncoder, wrapping storage: CodingDictionaryStorage, codingPath: [CodingKey]) {
         self.encoder = encoder
-        self.codingPath = codingPath
         self.storage = storage
+        self.codingPath = codingPath
+        self.initialCodingPathLength = codingPath.count
     }
 
     // MARK: Encoding
 
-    func encodeNil(forKey key: K) throws {
-        storage.setValue(.nil, forKey: key)
+    func encodeNil(forKey key: K) {
+        assertCanPerformWork()
+        storage[key] = .nil
     }
 
-    func encode(_ value: Bool, forKey key: K) throws {
-        storage.setValue(.bool(value), forKey: key)
+    func encode(_ value: Bool, forKey key: K) {
+        assertCanPerformWork()
+        storage[key] = .bool(value)
     }
 
-    func encode(_ value: Int, forKey key: K) throws {
-        storage.setValue(.int(Int64(value)), forKey: key)
+    func encode(_ value: Int, forKey key: K) {
+        assertCanPerformWork()
+        storage[key] = .int(Int64(value))
     }
 
-    func encode(_ value: Int8, forKey key: K) throws {
-        storage.setValue(.int(Int64(value)), forKey: key)
+    func encode(_ value: Int8, forKey key: K) {
+        assertCanPerformWork()
+        storage[key] = .int(Int64(value))
     }
 
-    func encode(_ value: Int16, forKey key: K) throws {
-        storage.setValue(.int(Int64(value)), forKey: key)
+    func encode(_ value: Int16, forKey key: K) {
+        assertCanPerformWork()
+        storage[key] = .int(Int64(value))
     }
 
-    func encode(_ value: Int32, forKey key: K) throws {
-        storage.setValue(.int(Int64(value)), forKey: key)
+    func encode(_ value: Int32, forKey key: K) {
+        assertCanPerformWork()
+        storage[key] = .int(Int64(value))
     }
 
-    func encode(_ value: Int64, forKey key: K) throws {
-        storage.setValue(.int(Int64(value)), forKey: key)
+    func encode(_ value: Int64, forKey key: K) {
+        assertCanPerformWork()
+        storage[key] = .int(Int64(value))
     }
 
-    func encode(_ value: UInt, forKey key: K) throws {
-        storage.setValue(.int(Int64(value)), forKey: key)
+    func encode(_ value: UInt, forKey key: K) {
+        assertCanPerformWork()
+        storage[key] = .int(Int64(value))
     }
 
-    func encode(_ value: UInt8, forKey key: K) throws {
-        storage.setValue(.int(Int64(value)), forKey: key)
+    func encode(_ value: UInt8, forKey key: K) {
+        assertCanPerformWork()
+        storage[key] = .int(Int64(value))
     }
 
-    func encode(_ value: UInt16, forKey key: K) throws {
-        storage.setValue(.int(Int64(value)), forKey: key)
+    func encode(_ value: UInt16, forKey key: K) {
+        assertCanPerformWork()
+        storage[key] = .int(Int64(value))
     }
 
-    func encode(_ value: UInt32, forKey key: K) throws {
-        storage.setValue(.int(Int64(value)), forKey: key)
+    func encode(_ value: UInt32, forKey key: K) {
+        assertCanPerformWork()
+        storage[key] = .int(Int64(value))
     }
 
-    func encode(_ value: UInt64, forKey key: K) throws {
-        storage.setValue(.int(Int64(value)), forKey: key)
+    func encode(_ value: UInt64, forKey key: K) {
+        assertCanPerformWork()
+        storage[key] = .int(Int64(value))
     }
 
-    func encode(_ value: Float, forKey key: K) throws {
-        storage.setValue(.float(value), forKey: key)
+    func encode(_ value: Float, forKey key: K) {
+        assertCanPerformWork()
+        storage[key] = .float(value)
     }
 
-    func encode(_ value: Double, forKey key: K) throws {
-        storage.setValue(.double(value), forKey: key)
+    func encode(_ value: Double, forKey key: K) {
+        assertCanPerformWork()
+        storage[key] = .double(value)
     }
 
-    func encode(_ value: String, forKey key: K) throws {
-        storage.setValue(.string(value), forKey: key)
+    func encode(_ value: String, forKey key: K) {
+        assertCanPerformWork()
+        storage[key] = .string(value)
     }
 
     func encode<T: Encodable>(_ value: T, forKey key: K) throws {
 
-        try encoder.with(pushedKey: MessagePackCodingKey.string(key.stringValue)) {
+        assertCanPerformWork()
+
+        try self.with(pushedKey: MessagePackCodingKey.string(key.stringValue)) {
 
             guard let newContainer = try self.encoder.encodeToDetachedContainer(value) else {
                 let errorContext =  EncodingError.Context(codingPath: self.encoder.codingPath,
@@ -653,11 +712,11 @@ private class MessagePackKeyedEncodingContainer<K: CodingKey>: KeyedEncodingCont
 
             switch newContainer {
             case .singleValue(let value):
-                storage.setValue(value, forKey: key)
+                storage[key] = value
             case .unkeyed(let value):
-                storage.setValue(.array(value.copy()), forKey: key)
+                storage[key] = .array(value.copy())
             case .keyed(let value):
-                storage.setValue(.map(value.copy()), forKey: key)
+                storage[key] = .map(value.copy())
             }
 
         }
@@ -666,30 +725,38 @@ private class MessagePackKeyedEncodingContainer<K: CodingKey>: KeyedEncodingCont
 
     // MARK: Nested Containers
 
-    var nestedUnkeyedContainers: [String: CodingArrayStorage] = [:]
-    var nestedKeyedContainers: [String: CodingDictionaryStorage] = [:]
+    var nestedUnkeyedContainers: [MessagePackCodingKey: CodingArrayStorage] = [:]
+    var nestedKeyedContainers: [MessagePackCodingKey: CodingDictionaryStorage] = [:]
     var currentSuperEncoder: MessagePackReferencingEncoder? = nil
 
     func nestedContainer<NestedKey: CodingKey>(keyedBy keyType: NestedKey.Type, forKey key: K) -> KeyedEncodingContainer<NestedKey> {
+
+        assertCanPerformWork()
+
         let dictionary = CodingDictionaryStorage()
-        nestedKeyedContainers[key.stringValue] = dictionary
-        let container = MessagePackKeyedEncodingContainer<NestedKey>(referencing: encoder, codingPath: codingPath, wrapping: dictionary)
+        nestedKeyedContainers[key.nestedStorageKey] = dictionary
+
+        let container = MessagePackKeyedEncodingContainer<NestedKey>(referencing: encoder, wrapping: dictionary, codingPath: codingPath)
         return KeyedEncodingContainer(container)
+
     }
 
     func nestedUnkeyedContainer(forKey key: K) -> UnkeyedEncodingContainer {
+        assertCanPerformWork()
         let array = CodingArrayStorage()
-        nestedUnkeyedContainers[key.stringValue] = array
-        return MessagePackUnkeyedEncodingContainer(referencing: encoder, codingPath: codingPath, wrapping: array)
+        nestedUnkeyedContainers[key.nestedStorageKey] = array
+        return MessagePackUnkeyedEncodingContainer(referencing: encoder, wrapping: array, codingPath: codingPath)
     }
 
     func superEncoder() -> Encoder {
+        assertCanPerformWork()
         precondition(currentSuperEncoder == nil, "You can only encode `super` one time.")
         currentSuperEncoder = MessagePackReferencingEncoder(referencing: encoder, at: MessagePackCodingKey.super)
         return currentSuperEncoder!
     }
 
     func superEncoder(forKey key: K) -> Encoder {
+        assertCanPerformWork()
         precondition(currentSuperEncoder == nil, "You can only encode `super` one time.")
         currentSuperEncoder = MessagePackReferencingEncoder(referencing: encoder, at: key)
         return currentSuperEncoder!
@@ -699,15 +766,23 @@ private class MessagePackKeyedEncodingContainer<K: CodingKey>: KeyedEncodingCont
 
     deinit {
 
+        // Exit if no nested data needs to be encoded.
+
+        if nestedKeyedContainers.isEmpty && nestedUnkeyedContainers.isEmpty && currentSuperEncoder == nil {
+            return
+        }
+
+        assertCanPerformWork()
+
         // When the Encodable object finished encoding, add the contents of the nested containers
         // to the dictionary reference stored by the structure encoder
 
         for (key, nestedStorage) in nestedUnkeyedContainers {
-            storage.setValue(.array(nestedStorage.copy()), forKey: MessagePackCodingKey(stringValue: key))
+            storage[key] = .array(nestedStorage.copy())
         }
 
         for (key, nestedStorage) in nestedKeyedContainers {
-            storage.setValue(.map(nestedStorage.copy()), forKey: MessagePackCodingKey(stringValue: key))
+            storage[key] = .map(nestedStorage.copy())
         }
 
         // Add the contents of the super encoder
@@ -717,7 +792,7 @@ private class MessagePackKeyedEncodingContainer<K: CodingKey>: KeyedEncodingCont
                 fatalError("Keyed containers should not produce an unkeyed super encoder. Please file a bug report.")
             }
 
-            storage.setValue(superValue, forKey: key)
+            storage[key] = superValue
         }
 
     }
@@ -757,28 +832,23 @@ private class MessagePackReferencingEncoder: MessagePackStructureEncoder {
     fileprivate init(referencing encoder: MessagePackStructureEncoder, at index: Int) {
         self.encoder = encoder
         self.reference = .array(index)
-        super.init(userInfo: encoder.userInfo, dateEncodingStrategy: encoder.dateEncodingStrategy)
-        codingPath.append(MessagePackCodingKey.index(index))
+        let indexKey = MessagePackCodingKey.index(index)
+        super.init(codingPath: [indexKey], userInfo: encoder.userInfo, dateEncodingStrategy: encoder.dateEncodingStrategy)
     }
 
     /// Initializes `self` by referencing the given dictionary container in the given encoder.
     fileprivate init(referencing encoder: MessagePackStructureEncoder, at key: CodingKey) {
         self.encoder = encoder
         self.reference = .dictionary(key)
-        super.init(userInfo: encoder.userInfo, dateEncodingStrategy: encoder.dateEncodingStrategy)
-        self.codingPath.append(key)
-    }
-
-    // MARK: Options
-
-    override var containsFailures: Bool {
-        return codingPath.count != (encoder.codingPath.count + 1)
+        super.init(codingPath: [key], userInfo: encoder.userInfo, dateEncodingStrategy: encoder.dateEncodingStrategy)
     }
 
     // MARK: Deinitialization
 
     /// Finalizes `self` by writing the contents of our storage to the referenced encoder's storage.
     func commitChanges() -> (value: MessagePackValue, reference: Reference) {
+
+        assertCanPerformWork()
 
         let value: MessagePackValue
         precondition(container != nil, "Super encoder did not encode any value.")
